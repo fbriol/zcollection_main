@@ -239,7 +239,7 @@ def _load_and_apply_indexer(
 
 
 def _load_indexed(
-    args: Tuple[Any, Sequence[Tuple[Tuple[Tuple[str, int], ...], slice]]],
+    args: Tuple[Any, Indexer],
     fs: fsspec.AbstractFileSystem,
     partition_handler: partitioning.Partitioning,
     partition_properties: PartitioningProperties,

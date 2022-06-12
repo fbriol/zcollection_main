@@ -79,6 +79,27 @@ def test_view(
     assert ds is not None
     assert len(ds.variables) == 0
 
+    # Loading data from an indexer.
+    indexers = instance.map(
+        lambda x: slice(0, x.dimensions["num_lines"])  # type: ignore
+    ).compute()
+    ds = instance.load(indexer=indexers)
+    assert ds is not None
+    assert len(ds.variables) == 4
+    assert set(ds["time"].values.astype("datetime64[D]")) == {
+        numpy.datetime64("2000-01-01"),
+        numpy.datetime64("2000-01-04"),
+        numpy.datetime64("2000-01-07"),
+        numpy.datetime64("2000-01-10"),
+        numpy.datetime64("2000-01-13"),
+        numpy.datetime64("2000-01-16"),
+    }
+
+    ds = instance.load_indexed(
+        dict((ix, (item, )) for ix, item in enumerate(indexers)))
+    for ix, _ in enumerate(indexers):
+        assert numpy.all(ds[ix].variables["var1"].values == ix)
+
     # Test view loading that is no longer synchronized with the reference
     # collection.
     tested_fs.fs.rm(str(

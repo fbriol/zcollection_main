@@ -9,6 +9,7 @@ View on a reference collection.
 from typing import (
     Any,
     ClassVar,
+    Dict,
     Iterable,
     Iterator,
     List,
@@ -104,6 +105,66 @@ def _drop_zarr_zarr(partition: str,
     # pylint: enable=broad-except
 
 
+def _load_view_dataset(
+    attrs: Sequence[dataset.Attribute],
+    base_dir: str,
+    fs: fsspec.AbstractFileSystem,
+    partition: str,
+    variables: Sequence[str],
+) -> dataset.Dataset:
+    """Load a dataset from a view.
+
+    Args:
+        attrs: The attributes of the reference dataset.
+        base_dir: Base directory of the view.
+        fs: The file system used to access the variables in the view.
+        partition: The partition to load.
+        variables: The list of variables to load.
+
+    Returns:
+        The dataset.
+    """
+    return dataset.Dataset(
+        [
+            storage.open_zarr_array(
+                zarr.open(  # type: ignore
+                    fs.get_mapper(fs.sep.join(
+                        (base_dir, partition, variable))),
+                    mode="r"),
+                variable) for variable in variables
+        ],
+        attrs)
+
+
+def _merge_view_dataset(
+    base_dir: str,
+    ds: dataset.Dataset,
+    fs: fsspec.AbstractFileSystem,
+    partition: str,
+    variables: Sequence[str],
+) -> None:
+    """Merge a view dataset into a reference dataset.
+
+    Args:
+        base_dir: Base directory of the view.
+        ds: The dataset to merge.
+        fs: The file system used to access the variables in the view.
+        variables: The list of variables to merge.
+    """
+    # pylint: disable=expression-not-assigned
+    {
+        ds.add_variable(item.metadata(), item.array)
+        for item in (
+            storage.open_zarr_array(
+                zarr.open(  # type: ignore
+                    fs.get_mapper(fs.sep.join((base_dir, partition,
+                                               variable))),
+                    mode="r"),
+                variable) for variable in variables)
+    }
+    # pylint: enable=expression-not-assigned
+
+
 def _load_one_dataset(
     args: Tuple[Tuple[Tuple[str, int], ...], List[slice]],
     base_dir: str,
@@ -119,8 +180,7 @@ def _load_one_dataset(
         args: Tuple containing the partition's keys and its indexer.
         base_dir: Base directory of the view.
         fs: The file system used to access the variables in the view.
-        selected_variables: The list of variable to retain from the view
-            reference.
+        selected_variables: The list of variable to retain.
         view_ref: The view reference.
         variables: The variables to retain from the view
 
@@ -132,33 +192,19 @@ def _load_one_dataset(
     ds = storage.open_zarr_group(
         view_ref.fs.sep.join((view_ref.partition_properties.dir, partition)),
         view_ref.fs, selected_variables)
-    if ds is None:
-        return None
 
     # If the user has not selected any variables in the reference view. In this
     # case, the dataset is built from all the variables selected in the view.
     if len(ds.dimensions) == 0:
-        return dataset.Dataset(
-            [
-                storage.open_zarr_array(
-                    zarr.open(  # type: ignore
-                        fs.get_mapper(
-                            fs.sep.join((base_dir, partition, variable))),
-                        mode="r"),
-                    variable) for variable in variables
-            ],
-            ds.attrs), partition
+        return _load_view_dataset(
+            ds.attrs,
+            base_dir,
+            fs,
+            partition,
+            variables,
+        ), partition
 
-    _ = {
-        ds.add_variable(item.metadata(), item.array)
-        for item in (
-            storage.open_zarr_array(
-                zarr.open(  # type: ignore
-                    fs.get_mapper(fs.sep.join((base_dir, partition,
-                                               variable))),
-                    mode="r"),
-                variable) for variable in variables)
-    }
+    _merge_view_dataset(base_dir, ds, fs, partition, variables)
 
     # Apply indexing if needed.
     if len(slices):
@@ -169,6 +215,51 @@ def _load_one_dataset(
         if ds_list:
             ds = ds.concat(ds_list, dim)
     return ds, partition
+
+
+def _load_indexed(
+    args: Tuple[Any, collection.Indexer],
+    base_dir: str,
+    fs: fsspec.AbstractFileSystem,
+    selected_variables: Optional[Iterable[str]],
+    view_ref: collection.Collection,
+    variables: Sequence[str],
+) -> Tuple[Any, dataset.Dataset]:
+    """Load an indexed element from a view.
+
+    Args:
+        args: Tuple containing the key and its indexer.
+        base_dir: Base directory of the view.
+        fs: The file system used to access the variables in the view.
+        selected_variables: The list of variable to retain.
+        view_ref: The view reference.
+        variables: The variables to retain from the view
+
+    Returns:
+        A tuple containing the key and the loaded dataset.
+    """
+    arrays = []
+    for partition_scheme, section in args[1]:
+        partition = view_ref.partitioning.join(partition_scheme, fs.sep)
+        ds = storage.open_zarr_group(
+            view_ref.fs.sep.join(
+                (view_ref.partition_properties.dir, partition)), view_ref.fs,
+            selected_variables)
+        if len(ds.dimensions) == 0:
+            ds = _load_view_dataset(
+                ds.attrs,
+                base_dir,
+                fs,
+                partition,
+                variables,
+            )
+        else:
+            _merge_view_dataset(base_dir, ds, fs, partition, variables)
+        arrays.append(ds.isel({view_ref.partition_properties.dim: section}))
+    array = arrays.pop(0)
+    if arrays:
+        array = array.concat(arrays, view_ref.partition_properties.dim)
+    return (args[0], array)
 
 
 def _assert_variable_handled(reference: meta.Dataset, view: meta.Dataset,
@@ -523,6 +614,36 @@ class View:
                                      self.view_ref.partition_properties.dim)
             return array
         return None
+
+    def load_indexed(
+        self,
+        indexer: Dict[Any, collection.Indexer],
+        *,
+        selected_variables: Optional[Iterable[str]] = None,
+    ) -> Dict[Any, dataset.Dataset]:
+        """Load an indexed element of the view.
+
+        Args:
+            indexer: The indexer to apply.
+            selected_variables: A list of variables to retain from the view.
+                If None, all variables are loaded.
+
+        Returns:
+            A dictionary between the indexer keys and the loaded datasets.
+        """
+        client = utilities.get_client()
+        bag = dask.bag.core.from_sequence(indexer.items(),
+                                          npartitions=utilities.dask_workers(
+                                              client, cores_only=True))
+        return dict(
+            bag.map(_load_indexed,
+                    base_dir=self.base_dir,
+                    fs=self.fs,
+                    selected_variables=self.view_ref.metadata.select_variables(
+                        selected_variables),
+                    view_ref=client.scatter(self.view_ref),
+                    variables=self.metadata.select_variables(
+                        selected_variables)).compute())
 
     def update(
         self,
