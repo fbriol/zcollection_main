@@ -361,7 +361,8 @@ def get_indexer(
 
     # Calculate the cumulative shape of the chunks.
     chunk_size = numpy.cumsum(
-        numpy.array(tuple(item.shape[axis] for item in chunks)))
+        numpy.fromiter((item.shape[axis] for item in chunks),
+                       dtype=numpy.int64))
 
     # Start index on the chunked axis.
     start = chunked_key.start
