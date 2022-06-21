@@ -16,6 +16,7 @@ import numpy
 import zarr
 
 from . import indexing
+from .. import utilities
 from ..meta import Attribute
 from ..typing import NDArray, NDMaskedArray
 from .abc import Variable, prod
@@ -69,11 +70,6 @@ class Array(Variable):
         #: If a view of the array is used, the range limits for each axis on
         #: the original array.
         self._tensor_domain: Optional[Sequence[indexing.Key]] = None
-
-        # If the user has specified a fill value, we need to set it on the
-        # underlying zarr array.
-        if fill_value is not None and self._array[0].fill_value != fill_value:
-            self._array[0].fill_value = fill_value
 
     @property
     def array(self) -> dask.array.core.Array:
@@ -410,11 +406,10 @@ class Array(Variable):
                 f"{items}, expected {self.dtype}.")
 
         # The fill value must always be the same.
-        items = set(item.fill_value for item in other)
-        if items != {self.fill_value}:
-            raise ValueError(
-                "Fill values must be the same for all variables. Found "
-                f"{items}, expected {self.fill_value}.")
+        if any(
+                utilities.are_they_different(self.fill_value, item.fill_value)
+                for item in other):
+            raise ValueError("Fill values must be the same for all variables.")
 
         # Only the concatenation axis can be chunked.
         shape = indexing.expected_shape(self.shape, axis)

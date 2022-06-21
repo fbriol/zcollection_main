@@ -231,3 +231,23 @@ def split_sequence(sequence: Sequence[Any],
         itertools.accumulate(
             ([0] + extras * [size + 1] + (sections - extras) * [size])))
     yield from (sequence[item:div[ix + 1]] for ix, item in enumerate(div[:-1]))
+
+
+def are_they_different(a: Any, b: Any) -> bool:
+    """Compare two scalars.
+
+    Args:
+        a: first scalar
+        b: second scalar
+
+    Returns:
+        True if the scalars are different, False otherwise.
+    """
+    if a is None and b is None:
+        return False
+    if a == b:
+        return False
+    cmp = lambda a: not a == a and a != a
+    if cmp(a) and cmp(b):
+        return False
+    return True
