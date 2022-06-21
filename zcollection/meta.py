@@ -31,6 +31,7 @@ class Pair(abc.ABC):
     def __init__(self, name: str, value: Any) -> None:
         #: Name of the key.
         self.name = name
+
         #: Value of the key.
         self.value = self._encode(value)
 
@@ -131,16 +132,22 @@ class Variable:
 
         #: Attributes of the variable.
         self.attrs = tuple(attrs)
+
         #: Compression codec for the variable.
         self.compressor = compressor
+
         #: Dimensions of the variable.
         self.dimensions = tuple(dimensions or ())
+
         #: Data type of the variable.
         self.dtype = numpy.dtype(dtype)
+
         #: Fill value for the variable.
         self.fill_value = fill_value
+
         #: Filter codecs for the variable.
         self.filters = filters or tuple()
+
         #: Variable name.
         self.name = name
 
@@ -287,6 +294,7 @@ class Dataset:
                 f"The variable {variable.name!r} already exists in the "
                 "collection.")
         dimensions = set(self.dimensions)
+
         # Looking for unknown dimensions.
         if (set(variable.dimensions) | dimensions) != dimensions:
             raise ValueError(
@@ -324,9 +332,10 @@ class Dataset:
             ValueError: If no variable with the same dimensions as the given
                 variable is found.
         """
-        for item in self.variables.values():
-            if item.dimensions == variable.dimensions:
-                return item
+        result = tuple(item for item in self.variables.values()
+                       if item.dimensions == variable.dimensions)
+        if result:
+            return result[0]
         raise ValueError("No variable using the same dimensions exists.")
 
     def missing_variables(self, other: "Dataset") -> Sequence[str]:

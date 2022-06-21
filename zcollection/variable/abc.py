@@ -82,7 +82,7 @@ def prod(iterable: Iterable) -> int:
 
 class Variable(abc.ABC):
     """Variables hold multi-dimensional arrays of data.
-    
+
     Args:
         name: Variable name.
         data: Variable data.
@@ -139,6 +139,11 @@ class Variable(abc.ABC):
 
         If no fill value is set, the array is returned.
         """
+
+    @data.setter
+    @abc.abstractmethod
+    def data(self, data: Any) -> None:
+        """Set the variable data."""
 
     @property
     @abc.abstractmethod
@@ -204,22 +209,6 @@ class Variable(abc.ABC):
 
         Returns:
             The variable.
-        """
-
-    @abc.abstractmethod
-    def duplicate(
-        self: T,
-        data: Any,
-    ) -> T:
-        """Create a new variable with the same properties as this instance, but
-        with the given data.
-
-        Args:
-            name: Name of the variable
-            data: Variable data
-
-        Returns:
-            A new variable with the given data.
         """
 
     @classmethod

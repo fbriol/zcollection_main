@@ -11,7 +11,7 @@ import itertools
 import numpy
 import zarr
 
-from .. import collection, dataset, partitioning
+from .. import collection, dataset, partitioning, variable
 from ..partitioning.tests.data import create_test_sequence
 
 START_DATE = numpy.datetime64("2000-01-01", "us")
@@ -19,7 +19,7 @@ END_DATE = numpy.datetime64("2000-06-30", "us")
 DELTA = numpy.timedelta64(72, "h")
 
 
-def create_test_dataset():
+def create_test_dataset(delayed: bool = True):
     """Create a temporal dataset."""
 
     dates = numpy.arange(START_DATE, END_DATE, DELTA)
@@ -28,75 +28,80 @@ def create_test_dataset():
     for item in numpy.array_split(dates, 12):
         mask = (dates >= item[0]) & (dates <= item[-1])
         measures = numpy.vstack((indices[mask], ) * 25).T
+        handler = dataset.DelayedArray if delayed else dataset.Array
+        yield dataset.Dataset(attrs=(dataset.Attribute(name="attr",
+                                                       value=1), ),
+                              variables=(
+                                  handler(name="time",
+                                          data=item,
+                                          dimensions=("num_lines", ),
+                                          attrs=(dataset.Attribute(name="attr",
+                                                                   value=1), ),
+                                          compressor=zarr.Blosc()),
+                                  handler(
+                                      name="var1",
+                                      data=measures,
+                                      dimensions=("num_lines", "num_pixels"),
+                                      attrs=(dataset.Attribute(name="attr",
+                                                               value=1), ),
+                                  ),
+                                  handler(
+                                      name="var2",
+                                      data=measures,
+                                      dimensions=("num_lines", "num_pixels"),
+                                      attrs=(dataset.Attribute(name="attr",
+                                                               value=1), ),
+                                  ),
+                              ))
 
-        yield dataset.Dataset(
-            attrs=(dataset.Attribute(name="attr", value=1), ),
-            variables=(
-                dataset.Variable(name="time",
-                                 data=item,
-                                 dimensions=("num_lines", ),
-                                 attrs=(dataset.Attribute(name="attr",
-                                                          value=1), ),
-                                 compressor=zarr.Blosc()),
-                dataset.Variable(
-                    name="var1",
-                    data=measures,
-                    dimensions=("num_lines", "num_pixels"),
-                    attrs=(dataset.Attribute(name="attr", value=1), ),
-                ),
-                dataset.Variable(
-                    name="var2",
-                    data=measures,
-                    dimensions=("num_lines", "num_pixels"),
-                    attrs=(dataset.Attribute(name="attr", value=1), ),
-                ),
-            ))
 
-
-def create_test_dataset_with_fillvalue():
+def create_test_dataset_with_fillvalue(delayed: bool = True):
     """Create a dataset with a fixed scale offset filter and fill values."""
 
     dates = numpy.arange(START_DATE, END_DATE, DELTA)
     measures = numpy.arange(0, len(dates), dtype=numpy.float64)
     measures[measures % 2 == 0] = 2147483647
     measures = numpy.vstack((measures, ) * 25).T * 1e-4
+    handler = dataset.DelayedArray if delayed else dataset.Array
 
     yield dataset.Dataset(
         attrs=(dataset.Attribute(name="attr", value=1), ),
         variables=(
-            dataset.Variable(
+            handler(
                 name="time",
                 data=dates,
                 dimensions=("num_lines", ),
                 attrs=(dataset.Attribute(name="attr", value=1), ),
                 compressor=zarr.Blosc(),
             ),
-            dataset.Variable(name="var1",
-                             data=measures,
-                             dimensions=("num_lines", "num_pixels"),
-                             attrs=(dataset.Attribute(name="attr", value=1), ),
-                             fill_value=214748.3647,
-                             filters=(zarr.FixedScaleOffset(scale=10000,
-                                                            offset=0,
-                                                            dtype="<f8",
-                                                            astype="i4"), )),
-            dataset.Variable(name="var2",
-                             data=measures,
-                             dimensions=("num_lines", "num_pixels"),
-                             attrs=(dataset.Attribute(name="attr", value=1), ),
-                             fill_value=214748.3647,
-                             filters=(zarr.FixedScaleOffset(scale=10000,
-                                                            offset=0,
-                                                            dtype="<f8",
-                                                            astype="i4"), )),
+            handler(name="var1",
+                    data=measures,
+                    dimensions=("num_lines", "num_pixels"),
+                    attrs=(dataset.Attribute(name="attr", value=1), ),
+                    fill_value=214748.3647,
+                    filters=(zarr.FixedScaleOffset(scale=10000,
+                                                   offset=0,
+                                                   dtype="<f8",
+                                                   astype="i4"), )),
+            handler(name="var2",
+                    data=measures,
+                    dimensions=("num_lines", "num_pixels"),
+                    attrs=(dataset.Attribute(name="attr", value=1), ),
+                    fill_value=214748.3647,
+                    filters=(zarr.FixedScaleOffset(scale=10000,
+                                                   offset=0,
+                                                   dtype="<f8",
+                                                   astype="i4"), )),
         ),
     )
 
 
-def create_test_collection(tested_fs, with_fillvalue=False):
+def create_test_collection(tested_fs, with_fillvalue=False, delayed=True):
     """Create a collection."""
-    ds = next(create_test_dataset_with_fillvalue(
-    ) if with_fillvalue else create_test_dataset())
+    ds = next(
+        create_test_dataset_with_fillvalue(
+            delayed=delayed) if with_fillvalue else create_test_dataset(
+                delayed=delayed))
     zcollection = collection.Collection("time",
                                         ds.metadata(),
                                         partitioning.Date(("time", ), "D"),
@@ -113,4 +118,4 @@ FILE_SYSTEM_DATASET = list(
     ], [
         create_test_dataset,
         create_test_dataset_with_fillvalue,
-    ]))
+    ], [True, False]))

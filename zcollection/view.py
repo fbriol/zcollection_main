@@ -108,6 +108,7 @@ def _drop_zarr_zarr(partition: str,
 def _load_view_dataset(
     attrs: Sequence[dataset.Attribute],
     base_dir: str,
+    delayed: bool,
     fs: fsspec.AbstractFileSystem,
     partition: str,
     variables: Sequence[str],
@@ -117,6 +118,8 @@ def _load_view_dataset(
     Args:
         attrs: The attributes of the reference dataset.
         base_dir: Base directory of the view.
+        delayed: If True, the values of the variable are stored in a Dask
+            array, otherwise they are directly handled from the Zarr arrays.
         fs: The file system used to access the variables in the view.
         partition: The partition to load.
         variables: The list of variables to load.
@@ -131,13 +134,15 @@ def _load_view_dataset(
                     fs.get_mapper(fs.sep.join(
                         (base_dir, partition, variable))),
                     mode="r"),
-                variable) for variable in variables
+                name=variable,
+                delayed=delayed) for variable in variables
         ],
         attrs)
 
 
 def _merge_view_dataset(
     base_dir: str,
+    delayed: bool,
     ds: dataset.Dataset,
     fs: fsspec.AbstractFileSystem,
     partition: str,
@@ -147,20 +152,23 @@ def _merge_view_dataset(
 
     Args:
         base_dir: Base directory of the view.
+        delayed: If True, the values of the variable are stored in a Dask
+            array, otherwise they are directly handled from the Zarr arrays.
         ds: The dataset to merge.
         fs: The file system used to access the variables in the view.
         variables: The list of variables to merge.
     """
     # pylint: disable=expression-not-assigned
     {
-        ds.add_variable(item.metadata(), item.array)
+        ds.add_variable(item.metadata(), item.array, delayed=delayed)
         for item in (
             storage.open_zarr_array(
                 zarr.open(  # type: ignore
                     fs.get_mapper(fs.sep.join((base_dir, partition,
                                                variable))),
                     mode="r"),
-                variable) for variable in variables)
+                name=variable,
+                delayed=delayed) for variable in variables)
     }
     # pylint: enable=expression-not-assigned
 
@@ -168,6 +176,7 @@ def _merge_view_dataset(
 def _load_one_dataset(
     args: Tuple[Tuple[Tuple[str, int], ...], List[slice]],
     base_dir: str,
+    delayed: bool,
     fs: fsspec.AbstractFileSystem,
     selected_variables: Optional[Iterable[str]],
     view_ref: collection.Collection,
@@ -179,6 +188,8 @@ def _load_one_dataset(
     Args:
         args: Tuple containing the partition's keys and its indexer.
         base_dir: Base directory of the view.
+        delayed: If True, the values of the variable are stored in a Dask
+            array, otherwise they are directly handled from the Zarr arrays.
         fs: The file system used to access the variables in the view.
         selected_variables: The list of variable to retain.
         view_ref: The view reference.
@@ -191,7 +202,7 @@ def _load_one_dataset(
     partition = view_ref.partitioning.join(partition_scheme, fs.sep)
     ds = storage.open_zarr_group(
         view_ref.fs.sep.join((view_ref.partition_properties.dir, partition)),
-        view_ref.fs, selected_variables)
+        view_ref.fs, selected_variables, delayed)
 
     # If the user has not selected any variables in the reference view. In this
     # case, the dataset is built from all the variables selected in the view.
@@ -199,12 +210,13 @@ def _load_one_dataset(
         return _load_view_dataset(
             ds.attrs,
             base_dir,
+            delayed,
             fs,
             partition,
             variables,
         ), partition
 
-    _merge_view_dataset(base_dir, ds, fs, partition, variables)
+    _merge_view_dataset(base_dir, delayed, ds, fs, partition, variables)
 
     # Apply indexing if needed.
     if len(slices):
@@ -220,6 +232,7 @@ def _load_one_dataset(
 def _load_indexed(
     args: Tuple[Any, collection.Indexer],
     base_dir: str,
+    delayed: bool,
     fs: fsspec.AbstractFileSystem,
     selected_variables: Optional[Iterable[str]],
     view_ref: collection.Collection,
@@ -230,6 +243,8 @@ def _load_indexed(
     Args:
         args: Tuple containing the key and its indexer.
         base_dir: Base directory of the view.
+        delayed: If True, the values of the variable are stored in a Dask
+            array, otherwise they are directly handled from the Zarr arrays.
         fs: The file system used to access the variables in the view.
         selected_variables: The list of variable to retain.
         view_ref: The view reference.
@@ -244,17 +259,19 @@ def _load_indexed(
         ds = storage.open_zarr_group(
             view_ref.fs.sep.join(
                 (view_ref.partition_properties.dir, partition)), view_ref.fs,
-            selected_variables)
+            selected_variables, delayed)
         if len(ds.dimensions) == 0:
             ds = _load_view_dataset(
                 ds.attrs,
                 base_dir,
+                delayed,
                 fs,
                 partition,
                 variables,
             )
         else:
-            _merge_view_dataset(base_dir, ds, fs, partition, variables)
+            _merge_view_dataset(base_dir, delayed, ds, fs, partition,
+                                variables)
         arrays.append(ds.isel({view_ref.partition_properties.dim: section}))
     array = arrays.pop(0)
     if arrays:
@@ -280,6 +297,7 @@ def _assert_variable_handled(reference: meta.Dataset, view: meta.Dataset,
 def _load_datasets_list(
     client: dask.distributed.Client,
     base_dir: str,
+    delayed: bool,
     fs: fsspec.AbstractFileSystem,
     view_ref: collection.Collection,
     metadata: meta.Dataset,
@@ -291,6 +309,8 @@ def _load_datasets_list(
     Args:
         client: The client used to load the datasets.
         base_dir: Base directory of the view.
+        delayed: If True, the values of the variable are stored in a Dask
+            array, otherwise they are directly handled from the Zarr arrays.
         fs: The file system used to access the variables in the view.
         view_ref: The view reference.
         metadata: The metadata of the dataset.
@@ -306,6 +326,7 @@ def _load_datasets_list(
         _load_one_dataset,
         arguments,
         base_dir=base_dir,
+        delayed=delayed,
         fs=fs,
         selected_variables=view_ref.metadata.select_variables(
             keep_variables=selected_variables),
@@ -553,6 +574,7 @@ class View:
     def load(
         self,
         *,
+        delayed: bool = True,
         filters: collection.PartitionFilter = None,
         indexer: Optional[collection.Indexer] = None,
         selected_variables: Optional[Iterable[str]] = None,
@@ -560,6 +582,8 @@ class View:
         """Load the view.
 
         Args:
+            delayed: If True, the values of the variable are stored in a Dask
+                array, otherwise they are directly handled from the Zarr arrays.
             filters: The predicate used to filter the partitions to drop.
                 To get more information on the predicate, see the
                 documentation of the :meth:`Collection.partitions
@@ -593,6 +617,7 @@ class View:
             _load_one_dataset,
             arguments,
             base_dir=self.base_dir,
+            delayed=delayed,
             fs=self.fs,
             selected_variables=self.view_ref.metadata.select_variables(
                 selected_variables),
@@ -619,12 +644,15 @@ class View:
         self,
         indexer: Dict[Any, collection.Indexer],
         *,
+        delayed: bool = True,
         selected_variables: Optional[Iterable[str]] = None,
     ) -> Dict[Any, dataset.Dataset]:
         """Load an indexed element of the view.
 
         Args:
             indexer: The indexer to apply.
+            delayed: If True, the values of the variable are stored in a Dask
+                array, otherwise they are directly handled from the Zarr arrays.
             selected_variables: A list of variables to retain from the view.
                 If None, all variables are loaded.
 
@@ -638,6 +666,7 @@ class View:
         return dict(
             bag.map(_load_indexed,
                     base_dir=self.base_dir,
+                    delayed=delayed,
                     fs=self.fs,
                     selected_variables=self.view_ref.metadata.select_variables(
                         selected_variables),
@@ -651,6 +680,7 @@ class View:
         variable: str,
         /,
         *args,
+        delayed: bool = True,
         filters: collection.PartitionFilter = None,
         partition_size: Optional[int] = None,
         selected_variables: Optional[Iterable[str]] = None,
@@ -662,6 +692,8 @@ class View:
             func: The function to apply to calculate the new values for the
                 target variable.
             variable: The name of the variable to update.
+            delayed: If True, the values of the variable are stored in a Dask
+                array, otherwise they are directly handled from the Zarr arrays.
             filters: The predicate used to filter the partitions to drop.
                 To get more information on the predicate, see the
                 documentation of the :meth:`Collection.partitions
@@ -694,7 +726,7 @@ class View:
         client = utilities.get_client()
 
         datasets_list = tuple(
-            _load_datasets_list(client, self.base_dir, self.fs,
+            _load_datasets_list(client, self.base_dir, delayed, self.fs,
                                 self.view_ref, self.metadata,
                                 self.partitions(filters), selected_variables))
 
@@ -727,6 +759,7 @@ class View:
         self,
         func: collection.MapCallable,
         *args,
+        delayed: bool = True,
         filters: collection.PartitionFilter = None,
         partition_size: Optional[int] = None,
         npartitions: Optional[int] = None,
@@ -737,6 +770,8 @@ class View:
         Args:
             func: The function to apply to every partition of the view.
             *args: The positional arguments to pass to the function.
+            delayed: If True, the values of the variable are stored in a Dask
+                array, otherwise they are directly handled from the Zarr arrays.
             filters: The predicate used to filter the partitions to process.
                 To get more information on the predicate, see the
                 documentation of the :meth:`zcollection.Collection.partitions`
@@ -781,8 +816,9 @@ class View:
 
         client = utilities.get_client()
         datasets_list = tuple(
-            _load_datasets_list(client, self.base_dir, self.fs, self.view_ref,
-                                self.metadata, self.partitions(filters)))
+            _load_datasets_list(client, self.base_dir, delayed, self.fs,
+                                self.view_ref, self.metadata,
+                                self.partitions(filters)))
         bag = dask.bag.core.from_sequence(datasets_list,
                                           partition_size=partition_size,
                                           npartitions=npartitions)
@@ -794,6 +830,7 @@ class View:
         func: collection.MapCallable,
         depth: int,
         *args,
+        delayed: bool = True,
         filters: collection.PartitionFilter = None,
         partition_size: Optional[int] = None,
         npartitions: Optional[int] = None,
@@ -805,6 +842,8 @@ class View:
             func: The function to apply to every partition of the view.
             depth: The depth of the overlap between the partitions.
             *args: The positional arguments to pass to the function.
+            delayed: If True, the values of the variable are stored in a Dask
+                array, otherwise they are directly handled from the Zarr arrays.
             filters: The predicate used to filter the partitions to process.
                 To get more information on the predicate, see the
                 documentation of the :meth:`zcollection.Collection.partitions`
@@ -884,8 +923,9 @@ class View:
 
         client = utilities.get_client()
         datasets_list = tuple(
-            _load_datasets_list(client, self.base_dir, self.fs, self.view_ref,
-                                self.metadata, self.partitions(filters)))
+            _load_datasets_list(client, self.base_dir, delayed, self.fs,
+                                self.view_ref, self.metadata,
+                                self.partitions(filters)))
         bag = dask.bag.core.from_sequence(datasets_list,
                                           partition_size=partition_size,
                                           npartitions=npartitions)

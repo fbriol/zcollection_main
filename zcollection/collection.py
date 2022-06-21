@@ -120,6 +120,7 @@ class PartitioningProperties:
 
 
 def _wrap_update_func(
+    delayed: bool,
     func: PartitionCallable,
     fs: fsspec.AbstractFileSystem,
     variable: str,
@@ -131,6 +132,8 @@ def _wrap_update_func(
     returning variable's values as a numpy array.
 
     Args:
+        delayed: If True, the values of the variable are stored in a Dask
+            array, otherwise they are directly handled from the Zarr arrays.
         func: Function to apply on each partition.
         fs: File system on which the Zarr dataset is stored.
         variable: Name of the variable to update.
@@ -149,8 +152,12 @@ def _wrap_update_func(
         # Applying function for each partition's data
         for partition in partitions:
             array = func(
-                storage.open_zarr_group(partition, fs, selected_variables),
-                *args, **kwargs)
+                storage.open_zarr_group(
+                    partition,
+                    fs,
+                    delayed=delayed,
+                    selected_variables=selected_variables,
+                ), *args, **kwargs)
             storage.update_zarr_array(
                 dirname=fs.sep.join((partition, variable)),
                 array=array,
@@ -208,6 +215,7 @@ def _insert(
 
 def _load_and_apply_indexer(
     args: Tuple[Tuple[Tuple[str, int], ...], List[slice]],
+    delayed: bool,
     fs: fsspec.AbstractFileSystem,
     partition_handler: partitioning.Partitioning,
     partition_properties: PartitioningProperties,
@@ -217,6 +225,8 @@ def _load_and_apply_indexer(
 
     Args:
         args: Tuple containing the partition's keys and its indexer.
+        delayed: If True, the values of the variable are stored in a Dask
+            array, otherwise they are directly handled from the Zarr arrays.
         fs: The file system that the partition is stored on.
         partition_handler: The partitioning handler.
         partition_properties: The partitioning properties.
@@ -229,7 +239,10 @@ def _load_and_apply_indexer(
     partition = fs.sep.join((partition_properties.dir,
                              partition_handler.join(partition_scheme, fs.sep)))
 
-    ds = storage.open_zarr_group(partition, fs, selected_variables)
+    ds = storage.open_zarr_group(partition,
+                                 fs,
+                                 selected_variables,
+                                 delayed=delayed)
     arrays = []
     _ = {
         arrays.append(ds.isel({partition_properties.dim: indexer}))
@@ -240,6 +253,7 @@ def _load_and_apply_indexer(
 
 def _load_indexed(
     args: Tuple[Any, Indexer],
+    delayed: bool,
     fs: fsspec.AbstractFileSystem,
     partition_handler: partitioning.Partitioning,
     partition_properties: PartitioningProperties,
@@ -249,6 +263,8 @@ def _load_indexed(
 
     Args:
         args: Tuple containing the key and its indexer.
+        delayed: If True, the values of the variable are stored in a Dask
+            array, otherwise they are directly handled from the Zarr arrays.
         fs: The file system that the partition is stored on.
         partition_handler: The partitioning handler.
         partition_properties: The partitioning properties.
@@ -262,7 +278,10 @@ def _load_indexed(
         partition = fs.sep.join(
             (partition_properties.dir,
              partition_handler.join(partition_scheme, fs.sep)))
-        ds = storage.open_zarr_group(partition, fs, selected_variables)
+        ds = storage.open_zarr_group(partition,
+                                     fs,
+                                     delayed=delayed,
+                                     selected_variables=selected_variables)
         arrays.append(ds.isel({partition_properties.dim: section}))
     array = arrays.pop(0)
     if arrays:
@@ -285,9 +304,13 @@ def variables(
     """
     selected_variables = selected_variables or metadata.variables.keys()
     return tuple(
-        dataset.Variable(
-            v.name, numpy.ndarray((0, ) * len(v.dimensions), v.dtype),
-            v.dimensions, v.attrs, v.compressor, v.fill_value, v.filters)
+        dataset.Array(v.name,
+                      numpy.ndarray((0, ) * len(v.dimensions), v.dtype),
+                      v.dimensions,
+                      attrs=v.attrs,
+                      compressor=v.compressor,
+                      fill_value=v.fill_value,
+                      filters=v.filters)
         for k, v in metadata.variables.items() if k in selected_variables)
 
 
@@ -376,19 +399,25 @@ class Collection:
 
         #: The axis of the collection.
         self.axis = axis
+
         #: The metadata that describes the dataset handled by the collection.
         self.metadata = ds
+
         #: The file system used to read/write the collection.
         self.fs = utilities.get_fs(filesystem)
+
         #: The partitioning strategy used to split the data.
         self.partitioning = partition_handler
+
         #: The partitioning properties (base directory and dimension).
         self.partition_properties = PartitioningProperties(
             partition_base_dir.rstrip(self.fs.sep),
             ds.variables[axis].dimensions[0],
         )
+
         #: The access mode of the collection.
         self.mode = mode
+
         #: The synchronizer used to synchronize the modifications.
         self.synchronizer = synchronizer or sync.NoSync()
 
@@ -660,6 +689,7 @@ class Collection:
         self,
         func: MapCallable,
         *args,
+        delayed: bool = True,
         filters: PartitionFilter = None,
         partition_size: Optional[int] = None,
         npartitions: Optional[int] = None,
@@ -670,6 +700,8 @@ class Collection:
         Args:
             func: The function to apply to every partition of the collection.
             *args: The positional arguments to pass to the function.
+            delayed: If True, the values of the variable are stored in a Dask
+                array, otherwise they are directly handled from the Zarr arrays.
             filters: The predicate used to filter the partitions to process.
                 To get more information on the predicate, see the
                 documentation of the :meth:`partitions` method.
@@ -693,6 +725,7 @@ class Collection:
         def _wrap(
             partition: str,
             func: PartitionCallable,
+            delayed: bool,
             *args,
             **kwargs,
         ) -> Tuple[Tuple[Tuple[str, int], ...], Any]:
@@ -701,20 +734,23 @@ class Collection:
             Args:
                 func: The function to apply.
                 partition: The partition to apply the function on.
+                delayed: If True, the values of the variable are stored in a
+                    Dask array, otherwise they are directly handled from the
+                    Zarr arrays.
                 *args: The positional arguments to pass to the function.
                 **kwargs: The keyword arguments to pass to the function.
 
             Returns:
                 The result of the function.
             """
-            ds = storage.open_zarr_group(partition, self.fs)
+            ds = storage.open_zarr_group(partition, self.fs, delayed=delayed)
             return self.partitioning.parse(partition), func(
                 ds, *args, **kwargs)
 
         bag = dask.bag.core.from_sequence(self.partitions(filters=filters),
                                           partition_size=partition_size,
                                           npartitions=npartitions)
-        return bag.map(_wrap, func, *args, **kwargs)
+        return bag.map(_wrap, func, delayed, *args, **kwargs)
         # pylint: enable=duplicate-code
 
     def map_overlap(
@@ -722,6 +758,7 @@ class Collection:
         func: MapCallable,
         depth: int,
         *args,
+        delayed: bool = True,
         filters: PartitionFilter = None,
         partition_size: Optional[int] = None,
         npartition: Optional[int] = None,
@@ -734,6 +771,8 @@ class Collection:
             func: The function to apply to every partition of the collection.
             depth: The depth of the overlap between the partitions.
             *args: The positional arguments to pass to the function.
+            delayed: If True, the values of the variable are stored in a Dask
+                array, otherwise they are directly handled from the Zarr arrays.
             filters: The predicate used to filter the partitions to process.
                 To get more information on the predicate, see the
                 documentation of the :meth:`partitions` method.
@@ -759,6 +798,7 @@ class Collection:
             partition: str,
             func: PartitionCallable,
             partitions: Tuple[str, ...],
+            delayed: bool,
             depth: int,
             *args,
             **kwargs,
@@ -768,6 +808,9 @@ class Collection:
             Args:
                 partition: The partition to apply the function on.
                 func: The function to apply.
+                delayed: If True, the values of the variable are stored in a
+                    Dask array, otherwise they are directly handled from the
+                    Zarr arrays.
                 depth: The depth of the overlap between the partitions.
                 base_dir: The base directory of the collection.
                 partitioning: The partitioning scheme of the collection.
@@ -788,7 +831,7 @@ class Collection:
 
             # Load the datasets for each selected partition.
             groups = [
-                storage.open_zarr_group(partition, self.fs)
+                storage.open_zarr_group(partition, self.fs, delayed=delayed)
                 for partition in selected_partitions
             ]
 
@@ -815,11 +858,13 @@ class Collection:
         bag = dask.bag.core.from_sequence(partitions,
                                           partition_size=partition_size,
                                           npartitions=npartition)
-        return bag.map(_wrap, func, partitions, depth, *args, **kwargs)
+        return bag.map(_wrap, func, partitions, delayed, depth, *args,
+                       **kwargs)
 
     def load(
         self,
         *,
+        delayed: bool = True,
         filters: PartitionFilter = None,
         indexer: Optional[Indexer] = None,
         selected_variables: Optional[Iterable[str]] = None,
@@ -827,6 +872,8 @@ class Collection:
         """Load the selected partitions.
 
         Args:
+            delayed: If True, the values of the variable are stored in a Dask
+                array, otherwise they are directly handled from the Zarr arrays.
             filters: The predicate used to filter the partitions to load.
                 To get more information on the predicate, see the
                 documentation of the :meth:`partitions` method.
@@ -864,6 +911,7 @@ class Collection:
                 self.partitions(filters=filters),
                 npartitions=utilities.dask_workers(client, cores_only=True))
             arrays = bag.map(storage.open_zarr_group,
+                             delayed=delayed,
                              fs=self.fs,
                              selected_variables=selected_variables).compute()
         else:
@@ -881,6 +929,7 @@ class Collection:
                 itertools.chain.from_iterable(
                     bag.map(
                         _load_and_apply_indexer,
+                        delayed=delayed,
                         fs=self.fs,
                         partition_handler=self.partitioning,
                         partition_properties=self.partition_properties,
@@ -896,6 +945,7 @@ class Collection:
         self,
         indexer: Dict[Any, Indexer],
         *,
+        delayed: bool = True,
         selected_variables: Optional[Iterable[str]] = None,
     ) -> Dict[Any, dataset.Dataset]:
         """Load each indexed element of the collection in a dictionary. The
@@ -903,6 +953,8 @@ class Collection:
 
         Args:
             indexer: The indexer to apply.
+            delayed: If True, the values of the variable are stored in a Dask
+                array, otherwise they are directly handled from the Zarr arrays.
             selected_variables: A list of variables to retain from the
                 collection. If None, all variables are kept.
 
@@ -917,6 +969,7 @@ class Collection:
         return dict(
             bag.map(
                 _load_indexed,
+                delayed=delayed,
                 fs=self.fs,
                 partition_handler=self.partitioning,
                 partition_properties=self.partition_properties,
@@ -930,6 +983,7 @@ class Collection:
         variable: str,
         /,
         *args,
+        delayed: bool = True,
         filters: Optional[PartitionFilter] = None,
         partition_size: Optional[int] = None,
         selected_variables: Optional[Iterable[str]] = None,
@@ -942,6 +996,8 @@ class Collection:
             func: The function to apply on each partition.
             variable: The variable to update.
             *args: The positional arguments to pass to the function.
+            delayed: If True, the values of the variable are stored in a Dask
+                array, otherwise they are directly handled from the Zarr arrays.
             filters: The expression used to filter the partitions to update.
             partition_size: The number of partitions to update in a single
                 batch. By default 1, which is the same as to map the function to
@@ -962,7 +1018,8 @@ class Collection:
         _LOGGER.info("Updating of the %r variable in the collection", variable)
         client = utilities.get_client()
 
-        local_func = _wrap_update_func(func=func,
+        local_func = _wrap_update_func(delayed=delayed,
+                                       func=func,
                                        fs=self.fs,
                                        selected_variables=selected_variables,
                                        variable=variable,

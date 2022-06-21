@@ -9,7 +9,7 @@ Test partitioning by sequence.
 from typing import Dict, Iterator
 import pickle
 
-import dask.array
+import dask.array.core
 import numpy
 import pytest
 import xarray
@@ -50,7 +50,9 @@ def test_construction():
         partitioning.parse("field=1")
 
 
+@pytest.mark.parametrize("delayed", [True, False])
 def test_split_dataset(
+        delayed,
         dask_client,  # pylint: disable=redefined-outer-name,unused-argument
 ):
     """Test the split_dataset method."""
@@ -81,7 +83,7 @@ def test_split_dataset(
             xr_ds.where((xr_ds.cycle_number == cycle_number)
                         & (xr_ds.pass_number == pass_number),
                         drop=True).observation ==
-            subset.variables["observation"].array)
+            subset.variables["observation"].values)
 
         partition_keys = partitioning.parse("/".join(partition))
         assert partition_keys == (("cycle_number", cycle_number),
@@ -136,7 +138,7 @@ def test_multiple_sequence(
             arrays["_c"] = numpy.concatenate(
                 (arrays["_c"], numpy.arange(5, dtype="i8")))
     partitioning = Sequence(("_a", "_b", "_c"))
-    variables: Dict[str, dask.array.Array] = dict(
+    variables: Dict[str, dask.array.core.Array] = dict(
         _a=dask.array.from_array(arrays["_a"], chunks=(10, )),  # type: ignore
         _b=dask.array.from_array(arrays["_b"], chunks=(10, )),  # type: ignore
         _c=dask.array.from_array(arrays["_c"], chunks=(10, )))  # type: ignore
@@ -155,8 +157,8 @@ def test_multiple_sequence(
         assert item[1] == slice(ix, ix + 1)
 
     numpy.random.shuffle(arrays["_c"])
-    variables["_c"] = dask.array.from_array(arrays["_c"],
-                                            chunks=(10, ))  # type: ignore
+    variables["_c"] = dask.array.core.from_array(arrays["_c"],
+                                                 chunks=(10, ))  # type: ignore
 
     with pytest.raises(ValueError):
         list(partitioning._split(variables))
@@ -181,5 +183,7 @@ def test_values_must_be_integer(
     partitioning = Sequence(("values", ))
     # pylint: disable=protected-access
     with pytest.raises(TypeError):
-        list(partitioning._split({"values": dask.array.from_array(values)}))
+        list(
+            partitioning._split({"values":
+                                 dask.array.core.from_array(values)}))
     # pylint: enable=protected-access

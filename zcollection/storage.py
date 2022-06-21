@@ -18,7 +18,7 @@ import fsspec
 import numpy
 import zarr
 
-from . import dataset, meta, sync
+from . import dataset, meta, sync, variable
 #
 from .typing import ArrayLike
 
@@ -97,26 +97,25 @@ def _to_zarr(array: dask.array.core.Array, mapper: fsspec.FSMap, path: str,
 
 def write_zattrs(
     dirname: str,
-    variable: Union[meta.Variable, dataset.Variable],
+    var: Union[meta.Variable, dataset.Variable],
     fs: fsspec.AbstractFileSystem,
 ) -> None:
     """Write the attributes of a variable to a Zarr dataset.
 
     Args:
         dirname: The storage directory of the Zarr dataset.
-        variable: The variable to process.
+        var: The variable to process.
         fs: The file system on which the Zarr dataset is stored.
     """
-    attrs = collections.OrderedDict(item.get_config()
-                                    for item in variable.attrs)
-    attrs[DIMENSIONS] = variable.dimensions
-    path = fs.sep.join((dirname, variable.name, ZATTRS))
+    attrs = collections.OrderedDict(item.get_config() for item in var.attrs)
+    attrs[DIMENSIONS] = var.dimensions
+    path = fs.sep.join((dirname, var.name, ZATTRS))
     with fs.open(path, mode="w") as stream:
         json.dump(attrs, stream, indent=2)  # type: ignore
 
 
 def write_zarr_variable(
-    args: Tuple[str, dataset.Variable],
+    args: Tuple[str, variable.Variable],
     dirname: str,
     fs: fsspec.AbstractFileSystem,
 ) -> None:
@@ -129,11 +128,11 @@ def write_zarr_variable(
         dirname: The target directory.
         fs: The file system on which the Zarr dataset is stored.
     """
-    name, variable = args
-    kwargs = dict(filters=variable.filters)
-    data = variable.array
+    name, var = args
+    kwargs = dict(filters=var.filters)
+    data = var.array
 
-    chunks = {ix: -1 for ix in range(variable.ndim)}
+    chunks = {ix: -1 for ix in range(var.ndim)}
     data = data.rechunk(
         chunks,  # type: ignore
         block_size_limit=BLOCK_SIZE_LIMIT,
@@ -142,10 +141,10 @@ def write_zarr_variable(
     _to_zarr(array=data,
              mapper=fs.get_mapper(dirname),
              path=name,
-             compressor=variable.compressor,
-             fill_value=variable.fill_value,
+             compressor=var.compressor,
+             fill_value=var.fill_value,
              **kwargs)
-    write_zattrs(dirname, variable, fs)
+    write_zattrs(dirname, var, fs)
 
 
 def write_zarr_group(
@@ -188,23 +187,27 @@ def write_zarr_group(
     fs.invalidate_cache(dirname)
 
 
-def open_zarr_array(array: zarr.Array, name: str) -> dataset.Variable:
+def open_zarr_array(array: zarr.Array, name: str,
+                    delayed: bool) -> dataset.Variable:
     """Open a Zarr array as a Dask array.
 
     Args:
         array: The Zarr array to open.
         name: The name of the variable.
+        delayed: If True, the values of the variable are stored in a Dask
+            array, otherwise they are directly handled from the Zarr arrays.
 
     Returns:
         The variable.
     """
-    return dataset.Variable.from_zarr(array, name, DIMENSIONS)
+    handler = dataset.DelayedArray if delayed else dataset.Array
+    return handler.from_zarr(array, name, DIMENSIONS)
 
 
-def open_zarr_group(
-        dirname,
-        fs: fsspec.AbstractFileSystem,
-        selected_variables: Optional[Iterable[str]] = None) -> dataset.Dataset:
+def open_zarr_group(dirname,
+                    fs: fsspec.AbstractFileSystem,
+                    selected_variables: Optional[Iterable[str]] = None,
+                    delayed: bool = True) -> dataset.Dataset:
     """Open a Zarr group stored in a partition.
 
     Args:
@@ -212,6 +215,8 @@ def open_zarr_group(
         fs: The file system that the partition is stored on.
         selected_variables: The list of variables to retain from the Zarr
             group. If None, all variables are selected.
+        delayed: If True, the variables are opened as lazy Dask arrays,
+            otherwise as Zarr arrays.
 
     Returns:
         The zarr group stored in the partition.
@@ -223,7 +228,7 @@ def open_zarr_group(
     selected_variables = set(selected_variables) & set(
         store) if selected_variables is not None else set(store)
     variables = [
-        open_zarr_array(store[name], name)  # type: ignore
+        open_zarr_array(store[name], name, delayed)  # type: ignore
         for name in selected_variables
     ]
 
@@ -283,7 +288,7 @@ def del_zarr_array(
 
 def add_zarr_array(
     dirname: str,
-    variable: meta.Variable,
+    var: meta.Variable,
     template: str,
     fs: fsspec.AbstractFileSystem,
 ) -> None:
@@ -291,21 +296,20 @@ def add_zarr_array(
 
     Args:
         dirname: The name of the dataset.
-        variable: The variable to add.
+        var: The variable to add.
         template: The name of the template variable.
         fs: The file system that the dataset is stored on.
     """
-    _LOGGER.debug("Adding variable %r to Zarr dataset %r", variable.name,
-                  dirname)
+    _LOGGER.debug("Adding variable %r to Zarr dataset %r", var.name, dirname)
     shape = zarr.open(fs.get_mapper(fs.sep.join((dirname, template)))).shape
-    store = fs.get_mapper(fs.sep.join((dirname, variable.name)))
+    store = fs.get_mapper(fs.sep.join((dirname, var.name)))
     zarr.create(
         shape,
         chunks=True,
-        dtype=variable.dtype,
-        compressor=variable.compressor,  # type: ignore
-        fill_value=variable.fill_value,  # type: ignore
+        dtype=var.dtype,
+        compressor=var.compressor,  # type: ignore
+        fill_value=var.fill_value,  # type: ignore
         store=store,
-        filters=variable.filters)
-    write_zattrs(dirname, variable, fs)
+        filters=var.filters)
+    write_zattrs(dirname, var, fs)
     zarr.consolidate_metadata(fs.get_mapper(dirname))

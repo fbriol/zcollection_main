@@ -14,17 +14,20 @@ from .convenience import (
     open_collection,
     open_view,
 )
-from .dataset import Attribute, Dataset, Variable
+from .dataset import Attribute, Dataset
+from .variable import Array, DelayedArray, Variable
 from .version import __version__
 from .view import View, ViewReference
 
 __all__ = [
     "__version__",
+    "Array",
     "Attribute",
     "Collection",
     "create_collection",
     "create_view",
     "Dataset",
+    "DelayedArray",
     "Indexer",
     "merging",
     "open_collection",

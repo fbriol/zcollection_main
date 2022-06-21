@@ -9,12 +9,13 @@ Testing the storage module.
 import platform
 import time
 
-import dask.array
+import dask.array.wrap
 import dask.distributed
 import numpy
+import pytest
 import zarr
 
-from .. import dataset, storage, sync
+from .. import dataset, storage, sync, variable
 # pylint: disable=unused-import # Need to import for fixtures
 from .cluster import dask_client, dask_cluster
 from .fs import local_fs
@@ -61,25 +62,26 @@ def test_execute_transaction(
             assert item.done()
 
 
-def create_variable(shape, fill_value=None):
+def create_variable(shape, fill_value=None, delayed=False):
     """Create a variable."""
     data = numpy.ones(shape, dtype="uint8")
     if fill_value is not None:
         data[:, 0] = fill_value
-    return dataset.Variable(name="var",
-                            data=data,
-                            dimensions=("x", "y"),
-                            fill_value=fill_value,
-                            attrs=[
-                                dataset.Attribute("a", 1),
-                                dataset.Attribute("b", 2),
-                                dataset.Attribute("long_name", "long name")
-                            ])
+    variable_type = dataset.DelayedArray if delayed else dataset.Array
+    return variable_type(name="var",
+                         data=data,
+                         dimensions=("x", "y"),
+                         fill_value=fill_value,
+                         attrs=[
+                             dataset.Attribute("a", 1),
+                             dataset.Attribute("b", 2),
+                             dataset.Attribute("long_name", "long name")
+                         ])
 
 
-def create_dataset(shape):
+def create_dataset(shape, delayed=False):
     """Create a dataset."""
-    return dataset.Dataset([create_variable(shape)],
+    return dataset.Dataset([create_variable(shape, delayed=delayed)],
                            attrs=[
                                dataset.Attribute("a", 1),
                                dataset.Attribute("b", 2),
@@ -117,12 +119,14 @@ def test_write_attrs(
     assert local_fs.exists(str(local_fs.root.joinpath("var", storage.ZATTRS)))
 
 
+@pytest.mark.parametrize("delayed", [True, False])
 def test_write_variable(
+        delayed,
         local_fs,  # pylint: disable=redefined-outer-name
         dask_client,  # pylint: disable=redefined-outer-name,unused-argument
 ):
     """Test the write_variable function."""
-    var = create_variable((1024, 1024))
+    var = create_variable((1024, 1024), delayed=delayed)
     storage.write_zarr_variable(("var", var), str(local_fs.root), local_fs.fs)
     path = str(local_fs.root.joinpath("var"))
     assert local_fs.exists(path)
@@ -131,17 +135,20 @@ def test_write_variable(
     assert zarray.shape == (1024, 1024)
     assert numpy.all(zarray[...] == 1)
 
-    other = storage.open_zarr_array(zarray, "var")  # type:ignore
+    other = storage.open_zarr_array(zarray, "var",
+                                    delayed=delayed)  # type:ignore
     assert other.metadata() == var.metadata()
     assert numpy.all(other.values == var.values)
 
 
+@pytest.mark.parametrize("delayed", [True, False])
 def test_write_zarr_group(
+        delayed,
         local_fs,  # pylint: disable=redefined-outer-name
         dask_client,  # pylint: disable=redefined-outer-name
 ):
     """Test the write_zarr_group function."""
-    ds = create_dataset((1024, 1024))
+    ds = create_dataset((1024, 1024), delayed=delayed)
     # memory fs does not support multi-processes
     future = dask_client.submit(storage.write_zarr_group,
                                 dask_client.scatter(ds), str(local_fs.root),
@@ -155,19 +162,23 @@ def test_write_zarr_group(
     assert zarray.attrs["long_name"] == "long name"
     assert zarray["var"].attrs["_ARRAY_DIMENSIONS"] == ["x", "y"]
 
-    other = storage.open_zarr_group(str(local_fs.root), local_fs.fs)
+    other = storage.open_zarr_group(str(local_fs.root),
+                                    local_fs.fs,
+                                    delayed=delayed)
     assert other.metadata() == ds.metadata()
 
 
+@pytest.mark.parametrize("delayed", [True, False])
 def test_update_zarr_array(
+        delayed,
         local_fs,  # pylint: disable=redefined-outer-name
         dask_client,  # pylint: disable=redefined-outer-name,unused-argument
 ):
     """Test the update_zarr_array function."""
-    var = create_variable((1024, 1024), fill_value=10)
+    var = create_variable((1024, 1024), fill_value=10, delayed=delayed)
     storage.write_zarr_variable(("var", var), str(local_fs.root), local_fs.fs)
     path = str(local_fs.root.joinpath("var"))
-    storage.update_zarr_array(path, dask.array.full((1024, 1024), 2),
+    storage.update_zarr_array(path, dask.array.wrap.full((1024, 1024), 2),
                               local_fs.fs)
     mapper = local_fs.get_mapper(path)
     zarray = zarr.open(mapper)
@@ -181,24 +192,28 @@ def test_update_zarr_array(
     assert numpy.all(zarray[:, 0] == 10)
 
 
+@pytest.mark.parametrize("delayed", [True, False])
 def test_del_zarr_array(
+        delayed,
         local_fs,  # pylint: disable=redefined-outer-name
         dask_client,  # pylint: disable=redefined-outer-name,unused-argument
 ):
     """Test the del_zarr_array function."""
-    var = create_variable((1024, 1024))
+    var = create_variable((1024, 1024), delayed=delayed)
     root = str(local_fs.root)
     storage.write_zarr_variable(("var", var), root, local_fs.fs)
     storage.del_zarr_array(root, "var", local_fs.fs)
     assert not local_fs.exists(str(local_fs.root.joinpath("var")))
 
 
+@pytest.mark.parametrize("delayed", [True, False])
 def test_add_zarr_array(
+        delayed,
         local_fs,  # pylint: disable=redefined-outer-name
         dask_client,  # pylint: disable=redefined-outer-name,unused-argument
 ):
     """Test the add_zarr_array function."""
-    var = create_variable((1024, 1024), fill_value=10)
+    var = create_variable((1024, 1024), fill_value=10, delayed=delayed)
     root = str(local_fs.root)
     var.name = "var1"
     storage.write_zarr_variable(("var1", var), root, local_fs.fs)

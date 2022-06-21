@@ -103,7 +103,7 @@ def test_split_dataset(
                 (dates >= parsed_date)  # type: ignore
                 & (dates < parsed_date + timedelta)]  # type: ignore
             assert numpy.all(
-                subset.variables["dates"].array == expected_selection)
+                subset.variables["dates"].values == expected_selection)
 
             expected = (
                 ("year", item.year),

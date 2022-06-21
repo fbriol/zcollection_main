@@ -8,248 +8,38 @@ Testing datasets
 """
 import pickle
 
-import dask.array
+import dask.array.core
 import numpy
 import pytest
 import xarray
 import zarr
 
-from .. import dataset, meta
+from .. import dataset, meta, variable
 # pylint: disable=unused-import # Need to import for fixtures
 from .cluster import dask_client, dask_cluster
 
 # pylint enable=unused-import
 
 
-def test_maybe_truncate():
-    """Test the truncation of a string to a given length."""
-    data = list(range(1000))
-    # pylint: disable=protected-access
-    assert dataset._maybe_truncate(data, 10) == "[0, 1, ..."
-    assert dataset._maybe_truncate(data, len(str(data))) == str(data)
-    # pylint: enable=protected-access
-
-
-def create_test_variable(name="var1", fill_value=0):
+def create_test_delayed_variable(name="var1", fill_value=0):
     """Create a test variable."""
-    return dataset.Variable(name=name,
-                            data=numpy.arange(10, dtype="int64").reshape(5, 2),
-                            dimensions=("x", "y"),
-                            attrs=(dataset.Attribute(name="attr", value=1), ),
-                            compressor=zarr.Blosc(cname="zstd", clevel=1),
-                            fill_value=fill_value,
-                            filters=(zarr.Delta("int64", "int32"),
-                                     zarr.Delta("int32", "int32")))
+    return dataset.DelayedArray(name=name,
+                                data=numpy.arange(10,
+                                                  dtype="int64").reshape(5, 2),
+                                dimensions=("x", "y"),
+                                attrs=(dataset.Attribute(name="attr",
+                                                         value=1), ),
+                                compressor=zarr.Blosc(cname="zstd", clevel=1),
+                                fill_value=fill_value,
+                                filters=(zarr.Delta("int64", "int32"),
+                                         zarr.Delta("int32", "int32")))
 
 
 def create_test_dataset():
     """Create a test dataset."""
     return dataset.Dataset(attrs=(dataset.Attribute(name="attr", value=1), ),
-                           variables=(create_test_variable(),
-                                      create_test_variable("var2")))
-
-
-def test_variable(
-        dask_client,  # pylint: disable=redefined-outer-name,unused-argument
-):
-    """Test variable creation."""
-    var = create_test_variable()
-    assert var.name == "var1"
-    assert var.dtype == numpy.dtype("int64")
-    assert var.shape == (5, 2)
-    assert var.dimensions == ("x", "y")
-    assert var.attrs == (dataset.Attribute(name="attr", value=1), )
-    assert var.compressor.cname == "zstd"  # type: ignore
-    assert var.compressor.clevel == 1  # type: ignore
-    assert var.fill_value == 0
-    assert var.size == 10
-    assert var.nbytes == 80
-    assert var.filters == (
-        zarr.Delta("int64", "int32"),
-        zarr.Delta("int32", "int32"),
-    )
-    assert numpy.all(var.values == numpy.arange(10).reshape(5, 2))
-    assert numpy.all(var.values == var.values)
-    assert tuple(var.dimension_index()) == (("x", 0), ("y", 1))
-    assert isinstance(var.metadata(), meta.Variable)
-    assert isinstance(str(var), str)
-    assert isinstance(repr(var), str)
-
-    def foo(a, b):
-        return a + b
-
-    assert numpy.all(
-        foo(var, var.values) == numpy.arange(10).reshape(5, 2) +
-        numpy.arange(10).reshape(5, 2))
-
-    assert numpy.all(
-        foo(var, var.data).compute() == numpy.arange(10).reshape(5, 2) +
-        numpy.arange(10).reshape(5, 2))
-
-    var.data = numpy.ones((10, 4), dtype="int64")
-    assert var.data.shape == (10, 4)
-    assert isinstance(var.data, dask.array.Array)
-    assert numpy.all(var.values == 1)
-
-    with pytest.raises(ValueError):
-        var.data = numpy.ones((10, 4, 2), dtype="int64")
-
-
-def test_variable_duplicate(
-        dask_client,  # pylint: disable=redefined-outer-name,unused-argument
-):
-    """Test of the duplication of variables."""
-    var = create_test_variable()
-    other = var.duplicate(var.array * 2)
-    assert other.name == "var1"
-    assert other.dtype == numpy.dtype("int64")
-    assert other.shape == (5, 2)
-    assert other.dimensions == ("x", "y")
-    assert other.attrs == (dataset.Attribute(name="attr", value=1), )
-    assert other.compressor.cname == "zstd"  # type: ignore
-    assert other.compressor.clevel == 1  # type: ignore
-    assert other.fill_value == 0
-    assert other.filters == (
-        zarr.Delta("int64", "int32"),
-        zarr.Delta("int32", "int32"),
-    )
-    assert numpy.all(var.values == other.values / 2)  # type: ignore
-    assert var.have_same_properties(other)
-
-    with pytest.raises(ValueError):
-        var.duplicate(numpy.ones((10, 4, 2), dtype="int64"))
-
-
-def test_variable_concat(
-        dask_client,  # pylint: disable=redefined-outer-name,unused-argument
-):
-    """Test concatenation of variables."""
-    var_a = create_test_variable()
-    var_b = create_test_variable()
-    var_c = create_test_variable()
-
-    vard = var_a.concat((var_b, var_c), "x")
-    assert numpy.all(vard.values == numpy.concatenate(
-        (var_a.values, var_b.values, var_c.values), axis=0))
-
-    vard = var_a.concat(var_b, "x")
-    assert numpy.all(
-        vard.values == numpy.concatenate((var_a.values, var_b.values), axis=0))
-
-    with pytest.raises(ValueError):
-        var_a.concat([], "y")
-
-
-def test_variable_datetime64_to_xarray(
-        dask_client,  # pylint: disable=redefined-outer-name,unused-argument
-):
-    """Test conversion to xarray."""
-    dates = numpy.arange(
-        numpy.datetime64("2000-01-01", "ms"),
-        numpy.datetime64("2000-02-01", "ms"),
-        numpy.timedelta64("1", "h"),
-    )
-    var = dataset.Variable(
-        name="time",
-        data=dates,
-        dimensions=("num_lines", ),
-        attrs=(dataset.Attribute(name="attr", value=1), ),
-        compressor=zarr.Blosc(),
-        filters=(zarr.Delta("int64", "int64"), ),
-    )
-    xr_var = var.to_xarray()
-    assert xr_var.dims == ("num_lines", )
-    assert xr_var.attrs == dict(attr=1)
-    assert xr_var.dtype == "datetime64[ns]"
-
-
-def test_variable_timedelta64_to_xarray(
-        dask_client,  # pylint: disable=redefined-outer-name,unused-argument
-):
-    """Test conversion to xarray."""
-    delta = numpy.diff(
-        numpy.arange(
-            numpy.datetime64("2000-01-01", "ms"),
-            numpy.datetime64("2000-02-01", "ms"),
-            numpy.timedelta64("1", "h"),
-        ))
-
-    var = dataset.Variable(
-        name="timedelta",
-        data=delta,
-        dimensions=("num_lines", ),
-        attrs=(dataset.Attribute(name="attr", value=1), ),
-        compressor=zarr.Blosc(),
-        filters=(zarr.Delta("int64", "int64"), ),
-    )
-    xr_var = var.to_xarray()
-    assert xr_var.dims == ("num_lines", )
-    assert xr_var.attrs == dict(attr=1)
-    assert xr_var.dtype.kind == "m"
-
-
-def test_variable_dimension_less(
-        dask_client,  # pylint: disable=redefined-outer-name,unused-argument
-):
-    """Concatenate two dimensionless variables."""
-    data = numpy.array([0, 1], dtype=numpy.int32)
-    args = ("nv", data, ("nv", ), (dataset.Attribute("comment", "vertex"),
-                                   dataset.Attribute("units", "1")))
-    n_vertex = dataset.Variable(*args)
-    assert n_vertex.fill_value is None
-    metadata = n_vertex.metadata()
-    assert metadata.fill_value is None
-    assert meta.Variable.from_config(metadata.get_config()) == metadata
-
-    other = dataset.Variable(*args)
-
-    concatenated = n_vertex.concat((other, ), "time")
-    assert numpy.all(concatenated.values == n_vertex.values)
-    assert concatenated.metadata() == n_vertex.metadata()
-
-
-def test_variable_getitem(
-        dask_client,  # pylint: disable=redefined-outer-name,unused-argument
-):
-    var = create_test_variable()
-    values = var.values
-    result = var[0].compute()
-    assert numpy.all(result == values[0])
-    result = var[0:2].compute()
-    assert numpy.all(result == values[0:2])
-    result = var[0:2, 0].compute()
-    assert numpy.all(result == values[0:2, 0])
-    result = var[0:2, 0:2].compute()
-    assert numpy.all(result == values[0:2, 0:2])
-
-
-def test_variable_fill(
-        dask_client,  # pylint: disable=redefined-outer-name,unused-argument
-):
-    """Test filling of variables."""
-    var = create_test_variable()
-    assert not var.values.all() is numpy.ma.masked
-    var.fill()
-    assert var.values.all() is numpy.ma.masked
-
-
-def test_variable_masked_array(
-        dask_client,  # pylint: disable=redefined-outer-name,unused-argument
-):
-    """Test masked array."""
-    var = create_test_variable()
-    var2 = var.rename("var2")
-    assert var2.array is var.array
-    assert var2.name == "var2"
-    assert var2.dimensions == var.dimensions
-    assert var2.attrs == var.attrs
-    assert var2.compressor == var.compressor
-    assert var2.filters == var.filters
-    assert var2.fill_value == var.fill_value
-    assert var2.dtype == var.dtype
-    assert var2.shape == var.shape
-    assert var2.size == var.size
-    assert var2.ndim == var.ndim
+                           variables=(create_test_delayed_variable(),
+                                      create_test_delayed_variable("var2")))
 
 
 def test_dataset(
@@ -262,20 +52,24 @@ def test_dataset(
     assert isinstance(str(ds), str)
     assert isinstance(repr(ds), str)
     assert ds.nbytes == 5 * 2 * 8 * 2
-    var1 = create_test_variable()
+    var1 = create_test_delayed_variable()
     assert numpy.all(ds.variables["var1"].values == var1.values)
     assert ds.variables["var1"].have_same_properties(var1)
     assert numpy.all(var1.values == ds["var1"].values)
     assert var1.metadata() == ds["var1"].metadata()
     with pytest.raises(KeyError):
         var1 = ds["varX"]
-    var2 = create_test_variable("var2")
+    var2 = create_test_delayed_variable("var2")
     assert numpy.all(ds.variables["var2"].values == var2.values)
     assert id(ds["var2"]) == id(ds.variables["var2"])
     assert ds.variables["var2"].have_same_properties(var2)
     assert isinstance(ds.metadata(), meta.Dataset)
     other = ds.compute()
     assert isinstance(other, dataset.Dataset)
+    for k, v in ds.variables.items():
+        assert isinstance(v, variable.Variable)
+        assert isinstance(v.metadata(), meta.Variable)
+        assert numpy.all(v.values == other.variables[k].values)
 
 
 def test_dataset_dimensions_conflict(
@@ -284,23 +78,23 @@ def test_dataset_dimensions_conflict(
     """Test dataset creation with dimensions conflict."""
     with pytest.raises(ValueError):
         dataset.Dataset([
-            dataset.Variable(name="var1",
-                             data=numpy.arange(10,
-                                               dtype="int64").reshape(5, 2),
-                             dimensions=("x", "y"),
-                             attrs=(dataset.Attribute(name="attr", value=1), ),
-                             compressor=zarr.Blosc(cname="zstd", clevel=1),
-                             fill_value=0,
-                             filters=(zarr.Delta("int64", "int32"),
-                                      zarr.Delta("int32", "int32"))),
-            dataset.Variable(name="var2",
-                             data=numpy.arange(20, dtype="int64"),
-                             dimensions=("x"),
-                             attrs=(dataset.Attribute(name="attr", value=1), ),
-                             compressor=zarr.Blosc(cname="zstd", clevel=1),
-                             fill_value=0,
-                             filters=(zarr.Delta("int64", "int32"),
-                                      zarr.Delta("int32", "int32"))),
+            dataset.Array(
+                name="var1",
+                data=zarr.array(numpy.arange(10, dtype="int64").reshape(5, 2)),
+                dimensions=("x", "y"),
+                attrs=(dataset.Attribute(name="attr", value=1), ),
+                compressor=zarr.Blosc(cname="zstd", clevel=1),
+                fill_value=0,
+                filters=(zarr.Delta("int64",
+                                    "int32"), zarr.Delta("int32", "int32"))),
+            dataset.Array(name="var2",
+                          data=zarr.array(numpy.arange(20, dtype="int64")),
+                          dimensions=("x"),
+                          attrs=(dataset.Attribute(name="attr", value=1), ),
+                          compressor=zarr.Blosc(cname="zstd", clevel=1),
+                          fill_value=0,
+                          filters=(zarr.Delta("int64", "int32"),
+                                   zarr.Delta("int32", "int32"))),
         ])
 
 
@@ -339,23 +133,6 @@ def test_dataset_isel(
         ds.isel(slices=dict(var1=slice(0, 1)))
 
 
-def test_dataset_delete(
-        dask_client,  # pylint: disable=redefined-outer-name,unused-argument
-):
-    """Test dataset deletion."""
-    ds = create_test_dataset()
-
-    other = ds.delete([1], "y")
-    assert numpy.all(
-        other.variables["var1"].values == numpy.arange(0, 10, 2).reshape(5, 1))
-    assert numpy.all(
-        other.variables["var2"].values == numpy.arange(0, 10, 2).reshape(5, 1))
-
-    other = ds.delete([0], "x")
-    assert numpy.all(other.variables["var1"].values == numpy.arange(
-        10).reshape(5, 2)[1:, :])
-
-
 def test_dataset_concat(
         dask_client,  # pylint: disable=redefined-outer-name,unused-argument
 ):
@@ -374,22 +151,6 @@ def test_dataset_concat(
 
     with pytest.raises(ValueError):
         ds1.concat([], "z")
-
-
-def test_variable_pickle(
-        dask_client,  # pylint: disable=redefined-outer-name,unused-argument
-):
-    """Test pickling of variables."""
-    variable = create_test_variable()
-    other = pickle.loads(pickle.dumps(variable))
-    assert numpy.all(variable.values == other.values)
-    assert variable.attrs == other.attrs
-    assert variable.compressor == other.compressor
-    assert variable.dimensions == other.dimensions
-    assert variable.dtype == other.dtype
-    assert variable.fill_value == other.fill_value
-    assert variable.filters == other.filters
-    assert variable.name == other.name
 
 
 def test_dataset_pickle(

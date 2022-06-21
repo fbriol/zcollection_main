@@ -2,9 +2,13 @@
 #
 # All rights reserved. Use of this source code is governed by a
 # BSD-style license that can be found in the LICENSE file.
+"""
+Indexing chunked arrays.
+========================
+"""
+from typing import Any, List, Optional, Sequence, Tuple, Union
 import abc
 import dataclasses
-from typing import Any, List, Optional, Sequence, Tuple, Union
 
 import numpy
 import zarr
@@ -13,6 +17,7 @@ from ..typing import NDArray
 
 #: The type of key for indexing.
 Key = Union[slice, NDArray]
+
 
 def slice_length(key: Key, length: int) -> int:
     """Calculate the length of the slice.
@@ -29,6 +34,7 @@ def slice_length(key: Key, length: int) -> int:
     if isinstance(key, slice):
         return len(range(key.start or 0, key.stop or length, key.step or 1))
     return key.size
+
 
 def calculate_shape(key: Optional[Sequence[Key]],
                     shape: Tuple[int, ...]) -> Tuple[int, ...]:
@@ -83,7 +89,9 @@ def _expand_indexer(
     result.extend((ndim - len(result)) * [slice(None)])
     for ix, dim in enumerate(shape):
         item = result[ix]
-        result[ix] = slice(item.start or 0, item.stop or dim, item.step or 1)
+        start, stop, step = item.start or 0, item.stop or dim, item.step or 1
+        result[ix] = slice(start + dim if start < 0 else start,
+                           stop + dim if stop < 0 else stop, step)
     return tuple(result)
 
 
@@ -100,8 +108,7 @@ class ShiftSlice:
 
 @dataclasses.dataclass(frozen=True)
 class Selection(abc.ABC):
-    """Base class for indexing into a variable.
-    """
+    """Base class for indexing into a variable."""
     key: Sequence[Optional[Key]]
     tensor_domain: Sequence[Key]
 
@@ -153,12 +160,14 @@ class MultipleSelection(Selection):
 
 
 def _shift_to_tensor_domain(
+    axis: int,
     key: Sequence[slice],
     tensor_domain: Sequence[Key],
 ) -> Tuple[slice]:
     """Shift the slice to the previous selection applied.
 
     Args:
+        axis: The chunked axis.
         key: The slice to shift.
         tensor_domain: The indices which it is possible to index
             on each axis of the tensor.
@@ -166,24 +175,17 @@ def _shift_to_tensor_domain(
     Returns:
         The shifted indexer key.
     """
+    # Reading the offset of the current tensor domain.
+    chunked_key = tensor_domain[axis]
+    offset = (chunked_key.start if isinstance(chunked_key, slice) else 0)
 
-    # If one of the offsets is relative to the size of the vector (negative
-    # values), then we need to convert it to an offset relative to its
-    # beginning.
-    def relative_to_start(item: Optional[int], key: Key) -> Optional[int]:
-        """Convert an offset relative to the end of the vector to an offset
-        relative to the beginning of the vector."""
-        size = key.stop if isinstance(key, slice) else key.size
-        return item + size if item is not None and item < 0 else item
+    # Shift the chunked key to the previous selection if needed.
+    if offset != 0:
+        key = tuple(
+            slice(item.start + offset, item.stop +
+                  offset, item.step) if ix == axis else item
+            for ix, item in enumerate(key))
 
-    key = tuple(
-        slice(
-            relative_to_start(new.start, limit),
-            relative_to_start(new.stop, limit),
-            new.step,
-        ) for limit, new in zip(tensor_domain, key))
-
-    # Then we can adjust the start and stop to the view bounds.
     def shift_start(key: Key, new: Optional[int]) -> int:
         """Shift the start of the slice to the view bounds."""
         start = key.start if isinstance(key, slice) else 0
@@ -231,7 +233,7 @@ def _calculate_tensor_domain(
 
 def _is_countiguous(key: Optional[Key]) -> bool:
     """Calculate if the current selected view is contiguous.
-    
+
     Args:
         key: The key for indexing.
 
@@ -241,24 +243,24 @@ def _is_countiguous(key: Optional[Key]) -> bool:
     if key is not None:
         if isinstance(key, slice):
             return (key.step or 1) == 1
-        assert key is NDArray
+        assert isinstance(key, NDArray)
         step = set(numpy.diff(key))
         return len(step) == 1 and step.pop() == 1
     return True
 
 
-def _calculate_vectorized_indexer(
+def _calculate_chunked_indices(
     indices: NDArray,
     chunk_size: NDArray,
 ) -> Tuple[NDArray, List[Optional[Key]]]:
     """Calculate a vector of indices for the selected chunks.
-    
+
     Args:
         indices: The indices to select in the different chunks.
 
     Returns:
         The index vector that represents the selected indices on the axis and
-        the list of indices to select in each chunk. 
+        the list of indices to select in each chunk.
     """
 
     # Looking for the indices of the selected chunks.
@@ -292,6 +294,38 @@ def _calculate_vectorized_indexer(
     return all_selected_indices, chunked_indices  # type: ignore
 
 
+def _calculate_vectorized_indexer(
+    axis: int,
+    chunk_size: NDArray,
+    expanded_key: Tuple[slice, ...],
+    is_countiguous: bool,
+    key: slice,
+    tensor_domain: Optional[Sequence[Key]],
+) -> Selection:
+    # In this case we need to build a vector index in order to
+    # determine the different indices used in each chunk.
+    indices = numpy.arange(key.start, key.stop)
+    item = tensor_domain[axis] if tensor_domain is not None else None
+    if (item is not None and not is_countiguous):
+
+        # The previous selection was not contiguous, so we need to
+        # subsample the indices according to the previous selection.
+        assert isinstance(item, NDArray), str(item)
+        indices = item[indices]
+
+    if key.step != 1:
+
+        # Subsample the indices according to the step.
+        indices = indices[::key.step]
+
+    indices, chunked_indices = _calculate_chunked_indices(indices, chunk_size)
+
+    return MultipleSelection(
+        chunked_indices,
+        tuple(indices if ix == axis else expanded_key[ix]
+              for ix in range(len(expanded_key))))
+
+
 def get_indexer(
     axis: int,
     chunks: Sequence[zarr.Array],
@@ -315,7 +349,8 @@ def get_indexer(
     expanded_key = _expand_indexer(key, shape)
 
     if tensor_domain is not None:
-        expanded_key = _shift_to_tensor_domain(expanded_key, tensor_domain)
+        expanded_key = _shift_to_tensor_domain(axis, expanded_key,
+                                               tensor_domain)
 
     if len(chunks) == 1:
         return SingleSelection(expanded_key,
@@ -329,17 +364,13 @@ def get_indexer(
         numpy.array(tuple(item.shape[axis] for item in chunks)))
 
     # Start index on the chunked axis.
-    start = chunked_key.start or 0
-    if start < 0:
-        start = chunk_size[-1] + start
+    start = chunked_key.start
 
     # Stop index on the chunked axis.
     stop = min(chunked_key.stop or chunk_size[-1], chunk_size[-1])
-    if stop < 0:
-        stop = chunk_size[-1] + stop
 
     # Slice step on the chunked axis.
-    step = chunked_key.step or 1
+    step = chunked_key.step
 
     # The result of an invalid selection is an empty array.
     if start >= stop:
@@ -357,33 +388,17 @@ def get_indexer(
 
     # Determine if the current domain is contiguous.
     is_countiguous = _is_countiguous(
-        expanded_key[axis] if expanded_key else None)
+        tensor_domain[axis] if tensor_domain else None)
 
     if step != 1 or not is_countiguous:
-
-        # In this case we need to build a vector index in order to
-        # determine the different indices used in each chunk.
-        indices = numpy.arange(start, stop)
-        item = expanded_key[axis] if expanded_key is not None else None
-        if (item is not None and not is_countiguous):
-
-            # The previous selection was not contiguous, so we need to
-            # subsample the indices according to the previous selection.
-            assert isinstance(item, NDArray)
-            indices = item[indices]
-
-        if step != 1:
-
-            # Subsample the indices according to the step.
-            indices = indices[::step]
-
-        indices, chunked_indices = _calculate_vectorized_indexer(
-            expanded_key, indices)
-
-        return MultipleSelection(
-            chunked_indices,
-            tuple(indices if ix == axis else expanded_key[ix]
-                  for ix, key in enumerate(expanded_key)))
+        return _calculate_vectorized_indexer(
+            axis,
+            chunk_size,
+            expanded_key,
+            is_countiguous,
+            slice(start, stop, step),
+            tensor_domain,
+        )
 
     # Move the start index forward to the selected chunk.
     start -= calculate_offset(chunk_size, ix0)

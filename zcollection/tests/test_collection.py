@@ -8,6 +8,7 @@ Test of the collections
 """
 import datetime
 import io
+import itertools
 
 import fsspec
 import numpy
@@ -37,6 +38,9 @@ from .data import (
 from .fs import local_fs, s3, s3_base, s3_fs
 
 # pylint: disable=unused-import
+
+ACCESS_ARGS = (["arg", "delayed"],
+               list(itertools.product(["local_fs", "s3_fs"], [True, False])))
 
 
 @pytest.mark.parametrize("arg", ["local_fs", "s3_fs"])
@@ -87,10 +91,11 @@ def test_collection_creation(
 
 
 # pylint: disable=too-many-statements
-@pytest.mark.parametrize("arg", ["local_fs", "s3_fs"])
+@pytest.mark.parametrize(*ACCESS_ARGS)
 def test_insert(
     dask_client,  # pylint: disable=redefined-outer-name,unused-argument
     arg,
+    delayed,
     request,
 ):
     """Test the insertion of a dataset."""
@@ -109,7 +114,7 @@ def test_insert(
         zcollection.insert(datasets[ix],
                            merge_callable=merging.merge_time_series)
 
-    data = zcollection.load()
+    data = zcollection.load(delayed=delayed)
     assert data is not None
     values = data.variables["time"].values
     assert numpy.all(values == numpy.arange(START_DATE, END_DATE, DELTA))
@@ -121,7 +126,7 @@ def test_insert(
     assert list(zcollection.partitions()) == sorted(
         list(zcollection.partitions()))
 
-    data = zcollection.load()
+    data = zcollection.load(delayed=delayed)
     assert data is not None
     values = data.variables["time"].values
     assert numpy.all(values == numpy.arange(START_DATE, END_DATE, DELTA))
@@ -134,28 +139,30 @@ def test_insert(
     numpy.all(values == numpy.vstack((numpy.arange(values.shape[0]), ) *
                                      values.shape[1]).T)
 
-    data = zcollection.load(filters="year == 2020")
+    data = zcollection.load(filters="year == 2020", delayed=delayed)
     assert data is None
 
-    data = zcollection.load(filters="year == 2000")
+    data = zcollection.load(filters="year == 2000", delayed=delayed)
     assert data is not None
     assert data.variables["time"].shape[0] == 61
 
-    data = zcollection.load(filters="year == 2000 and month == 4")
+    data = zcollection.load(filters="year == 2000 and month == 4",
+                            delayed=delayed)
     assert data is not None
     dates = data.variables["time"].values
     assert numpy.all(
         dates.astype("datetime64[M]") == numpy.datetime64("2000-04-01"))
 
     data = zcollection.load(
-        filters="year == 2000 and month == 4 and day == 15")
+        filters="year == 2000 and month == 4 and day == 15", delayed=delayed)
     assert data is not None
     dates = data.variables["time"].values
     assert numpy.all(
         dates.astype("datetime64[D]") == numpy.datetime64("2000-04-15"))
 
     data = zcollection.load(
-        filters="year == 2000 and month == 4 and day in range(5, 25)")
+        filters="year == 2000 and month == 4 and day in range(5, 25)",
+        delayed=delayed)
     assert data is not None
     data = zcollection.load(filters=lambda keys: datetime.date(
         2000, 4, 5) <= datetime.date(keys["year"], keys["month"], keys["day"])
@@ -172,32 +179,34 @@ def test_insert(
     zcollection = convenience.open_collection(str(tested_fs.collection),
                                               mode="r",
                                               filesystem=tested_fs.fs)
-    ds = zcollection.load(selected_variables=["var1"])
+    ds = zcollection.load(selected_variables=["var1"], delayed=delayed)
     assert ds is not None
     assert "var1" in ds.variables
     assert "var2" not in ds.variables
 
-    ds = zcollection.load(selected_variables=[])
+    ds = zcollection.load(selected_variables=[], delayed=delayed)
     assert ds is not None
     assert len(ds.variables) == 0
 
-    ds = zcollection.load(selected_variables=["varX"])
+    ds = zcollection.load(selected_variables=["varX"], delayed=delayed)
     assert ds is not None
     assert len(ds.variables) == 0
 
     # pylint: enable=too-many-statements
 
 
-@pytest.mark.parametrize("arg,create_test_data", FILE_SYSTEM_DATASET)
+@pytest.mark.parametrize(["arg", "create_test_data", "delayed"],
+                         FILE_SYSTEM_DATASET)
 def test_update(
     dask_client,  # pylint: disable=redefined-outer-name,unused-argument
     arg,
+    delayed,
     create_test_data,
     request,
 ):
     """Test the update of a dataset."""
     tested_fs = request.getfixturevalue(arg)
-    ds = next(create_test_data())
+    ds = next(create_test_data(delayed=delayed))
     zcollection = collection.Collection("time",
                                         ds.metadata(),
                                         partitioning.Date(("time", ), "D"),
@@ -205,14 +214,14 @@ def test_update(
                                         filesystem=tested_fs.fs)
     zcollection.insert(ds)
 
-    data = zcollection.load()
+    data = zcollection.load(delayed=delayed)
     assert data is not None
 
     def update(ds: dataset.Dataset):
         """Update function used for this test."""
         return ds.variables["var1"].values * -1 + 3
 
-    zcollection.update(update, "var2")  # type: ignore
+    zcollection.update(update, "var2", delayed=delayed)  # type: ignore
 
     assert numpy.allclose(data.variables["var2"].values,
                           data.variables["var1"].values * -1 + 3,
@@ -331,16 +340,18 @@ def test_add_variable(
     assert numpy.all(values.mask)  # type: ignore
 
 
-@pytest.mark.parametrize("arg,create_test_data", FILE_SYSTEM_DATASET)
+@pytest.mark.parametrize(["arg", "create_test_data", "delayed"],
+                         FILE_SYSTEM_DATASET)
 def test_add_update(
     dask_client,  # pylint: disable=redefined-outer-name,unused-argument
     arg,
+    delayed,
     create_test_data,
     request,
 ):
     """Test the adding and updating of a dataset."""
     tested_fs = request.getfixturevalue(arg)
-    ds = next(create_test_data())
+    ds = next(create_test_data(delayed=delayed))
     zcollection = collection.Collection("time",
                                         ds.metadata(),
                                         partitioning.Date(("time", ), "D"),
@@ -364,19 +375,33 @@ def test_add_update(
     zcollection.add_variable(new1)
     zcollection.add_variable(new2)
 
-    data = zcollection.load()
+    data = zcollection.load(delayed=delayed)
     assert data is not None
 
     def update_1(ds):
         """Update function used for this test."""
-        return ds.variables["var1"].data * 201.5
+        return ds.variables["var1"].values * 201.5
 
     def update_2(ds):
         """Update function used for this test."""
+        return ds.variables["var1"].values // 5
+
+    def delayed_update_1(ds):
+        """Update function used for this test."""
+        return ds.variables["var1"].data * 201.5
+
+    def delayed_update_2(ds):
+        """Update function used for this test."""
         return ds.variables["var1"].data // 5
 
-    zcollection.update(update_1, new1.name)  # type: ignore
-    zcollection.update(update_2, new2.name)  # type: ignore
+    zcollection.update(
+        delayed_update_1 if delayed else update_1,  # type: ignore
+        new1.name,
+        delayed=delayed)
+    zcollection.update(
+        delayed_update_2 if delayed else update_2,  # type: ignore
+        new2.name,
+        delayed=delayed)
 
     assert numpy.allclose(data.variables[new1.name].values,
                           data.variables["var1"].values * 201.5,
@@ -386,22 +411,25 @@ def test_add_update(
                           rtol=0)
 
 
-@pytest.mark.parametrize("arg", ["local_fs", "s3_fs"])
+@pytest.mark.parametrize(*ACCESS_ARGS)
 def test_fillvalue(
     dask_client,  # pylint: disable=redefined-outer-name,unused-argument
     arg,
+    delayed,
     request,
 ):
     """Test the management of masked values."""
     tested_fs = request.getfixturevalue(arg)
-    zcollection = create_test_collection(tested_fs, with_fillvalue=True)
+    zcollection = create_test_collection(tested_fs,
+                                         with_fillvalue=True,
+                                         delayed=delayed)
 
     # Load the dataset written with masked values in the collection and
     # compare it to the original dataset.
-    data = zcollection.load()
+    data = zcollection.load(delayed=delayed)
     assert data is not None
 
-    ds = next(create_test_dataset_with_fillvalue())
+    ds = next(create_test_dataset_with_fillvalue(delayed=delayed))
 
     values = data.variables["var1"].values
     assert isinstance(values, numpy.ma.MaskedArray)
@@ -430,10 +458,11 @@ def test_degraded_tests(
         zcollection.insert(fake_ds)
 
 
-@pytest.mark.parametrize("arg", ["local_fs", "s3_fs"])
+@pytest.mark.parametrize(*ACCESS_ARGS)
 def test_insert_with_missing_variable(
     dask_client,  # pylint: disable=redefined-outer-name,unused-argument
     arg,
+    delayed,
     request,
 ):
     """Test of the insertion of a dataset in which a variable is missing.
@@ -442,7 +471,7 @@ def test_insert_with_missing_variable(
     created by an algorithm.
     """
     tested_fs = request.getfixturevalue(arg)
-    ds = next(create_test_dataset_with_fillvalue()).to_xarray()
+    ds = next(create_test_dataset_with_fillvalue(delayed=delayed)).to_xarray()
     zcollection = convenience.create_collection(
         axis="time",
         ds=ds,
@@ -451,11 +480,11 @@ def test_insert_with_missing_variable(
         filesystem=tested_fs.fs)
     zcollection.insert(ds, merge_callable=merging.merge_time_series)
 
-    ds = next(create_test_dataset_with_fillvalue())
+    ds = next(create_test_dataset_with_fillvalue(delayed=delayed))
     ds.drops_vars("var1")
     zcollection.insert(ds)
 
-    data = zcollection.load()
+    data = zcollection.load(delayed=delayed)
     assert data is not None
     assert numpy.ma.allequal(
         data.variables["var1"].values,
@@ -495,23 +524,24 @@ def test_insert_failed(
     zcollection.insert(ds)
 
 
-@pytest.mark.parametrize("arg", ["local_fs", "s3_fs"])
+@pytest.mark.parametrize(*ACCESS_ARGS)
 def test_map_partition(
     dask_client,  # pylint: disable=redefined-outer-name,unused-argument
     arg,
+    delayed,
     request,
 ):
     """Test the update of a dataset."""
     tested_fs = request.getfixturevalue(arg)
-    zcollection = create_test_collection(tested_fs)
+    zcollection = create_test_collection(tested_fs, delayed=delayed)
 
-    result = zcollection.map(
-        lambda x: x.variables["var1"].values * 2)  # type: ignore
+    result = zcollection.map(lambda x: x.variables["var1"].values * 2,
+                             delayed=delayed)  # type: ignore
     for item in result.compute():
         folder = zcollection.fs.sep.join(
             (zcollection.partition_properties.dir,
              zcollection.partitioning.join(item[0], zcollection.fs.sep)))
-        ds = storage.open_zarr_group(folder, zcollection.fs)
+        ds = storage.open_zarr_group(folder, zcollection.fs, delayed=False)
         assert numpy.allclose(item[1], ds.variables["var1"].values * 2)
 
 
@@ -564,24 +594,26 @@ def test_variables():
     assert variables[0].name == "time"
 
 
-@pytest.mark.parametrize("arg", ["local_fs", "s3_fs"])
+@pytest.mark.parametrize(*ACCESS_ARGS)
 def test_map_overlap(
     dask_client,  # pylint: disable=redefined-outer-name,unused-argument
     arg,
+    delayed,
     request,
 ):
     """Test the map overlap method."""
     tested_fs = request.getfixturevalue(arg)
-    zcollection = create_test_collection(tested_fs)
+    zcollection = create_test_collection(tested_fs, delayed=delayed)
 
     result = zcollection.map_overlap(
         lambda x: x.variables["var1"].values * 2,  # type: ignore
+        delayed=delayed,
         depth=3)  # type: ignore
 
     for partition, indices, data in result.compute():
         folder = zcollection.fs.sep.join(
             (zcollection.partition_properties.dir,
              zcollection.partitioning.join(partition, zcollection.fs.sep)))
-        ds = storage.open_zarr_group(folder, zcollection.fs)
+        ds = storage.open_zarr_group(folder, zcollection.fs, delayed=False)
         assert numpy.allclose(data[indices, :] * 2,
                               ds.variables["var1"].values * 2)

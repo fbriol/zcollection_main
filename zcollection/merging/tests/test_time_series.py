@@ -55,8 +55,9 @@ def test_merge_intersection(
 
     existing_ds = ds1
     new_ds = copy.deepcopy(ds0)
-    new_ds.variables["time"] = ds0.variables["time"].duplicate(
-        ds0.variables["time"].values + numpy.timedelta64(9, "D"))
+    new_ds.variables[
+        "time"].data = ds0.variables["time"].values + numpy.timedelta64(
+            9, "D")
 
     ds = time_series.merge_time_series(existing_ds, new_ds, "time",
                                        "num_lines")
@@ -65,8 +66,9 @@ def test_merge_intersection(
 
     existing_ds = ds0
     new_ds = copy.deepcopy(ds1)
-    new_ds.variables["time"] = ds1.variables["time"].duplicate(
-        ds1.variables["time"].values - numpy.timedelta64(9, "D"))
+    new_ds.variables[
+        "time"].data = ds1.variables["time"].values - numpy.timedelta64(
+            9, "D")
     ds = time_series.merge_time_series(existing_ds, new_ds, "time",
                                        "num_lines")
     assert numpy.all(ds.variables["time"].values == numpy.concatenate((
@@ -74,8 +76,7 @@ def test_merge_intersection(
 
     existing_ds = ds0
     new_ds = ds0.isel(dict(num_lines=slice(1, -1)))
-    new_ds.variables["var1"] = new_ds.variables["var1"].duplicate(
-        new_ds.variables["var1"].values + 100)
+    new_ds.variables["var1"].data = new_ds.variables["var1"].values + 100
     ds = time_series.merge_time_series(existing_ds, new_ds, "time",
                                        "num_lines")
     assert numpy.all(ds.variables["var1"].values == numpy.concatenate((
