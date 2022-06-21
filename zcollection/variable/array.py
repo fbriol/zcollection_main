@@ -440,10 +440,6 @@ class Array(Variable):
         Returns:
             The variable slice.
         """
-        if (not isinstance(key, tuple)
-                or any(not isinstance(item, slice) for item in key)):
-            raise TypeError("key must be a tuple of slices")
-
         indexer = indexing.get_indexer(self._axis or 0, self._array, key,
                                        self.shape, self._tensor_domain)
 
